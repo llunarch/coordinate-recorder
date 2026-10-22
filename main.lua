@@ -9,7 +9,23 @@ local library=game:HttpGet("https://raw.githubusercontent.com/Footagesus/WindUI/
 -- Give this library instance its own GUI names; never remove another script's UI.
 library=library:gsub('Name="WindUI','Name="CoordinateRecorder')
 local WindUI=assert(loadstring(library))()
-local Window=WindUI:CreateWindow({Title="Coordinate Recorder",Author="",Icon="map-pin",Folder="CoordinateRecorderUI",Size=UDim2.fromOffset(780,530),MinSize=Vector2.new(560,340),Theme="Dark",Resizable=true,ToggleKey=Enum.KeyCode.RightControl,User={Enabled=false}})
+local theme=table.clone(WindUI:GetThemes().Dark)
+theme.Name="Umbrella"
+theme.Accent=Color3.fromHex("#1C1C1C")
+theme.Background=Color3.fromHex("#151515")
+theme.Dialog=Color3.fromHex("#1C1C1C")
+theme.Button=Color3.fromHex("#9B1E28")
+theme.Toggle=Color3.fromHex("#9B1E28")
+theme.Checkbox=Color3.fromHex("#9B1E28")
+theme.Text=Color3.fromHex("#EEEEEE")
+theme.ElementBackground=Color3.fromHex("#242424")
+theme.Primary=Color3.fromHex("#9B1E28")
+theme.Slider=theme.Primary
+theme.PanelBackground=Color3.fromHex("#151515")
+theme.PanelBackgroundTransparency=0
+theme.ElementBackgroundTransparency=0
+WindUI:AddTheme(theme)
+local Window=WindUI:CreateWindow({Title="Coordinate Recorder",Author="",Icon="map-pin",Folder="CoordinateRecorderUI",Size=UDim2.fromOffset(780,530),MinSize=Vector2.new(560,340),Theme="Umbrella",Transparent=false,SideBarWidth=196,ElementsRadius=8,Resizable=true,ToggleKey=Enum.KeyCode.RightShift,User={Enabled=false}})
 local Panel={alive=true,connections={}}
 local recorder=(function()
 --!nocheck
@@ -138,9 +154,31 @@ local function new(class,properties,parent)
  for key,value in pairs(properties)do object[key]=value end
  object.Parent=parent;return object
 end
+Window:SetBackgroundTransparency(0)
+Window:SetUIScale(1)
+Window.ElementConfig.UIPadding=8
+local main=Window.UIElements.Main
+local background=main:FindFirstChild("Background")
+local inner=Window.UIElements.MainBar:FindFirstChild("Background")
+if background then background.Visible=false end
+if inner then inner.Visible=false end
+local backdrop=new("Frame",{Name="UmbrellaBackdrop",BackgroundColor3=Color3.fromHex("#151515"),BorderSizePixel=0,Size=UDim2.fromScale(1,1),ZIndex=background and background.ZIndex or 0},main)
+new("UICorner",{CornerRadius=UDim.new(0,18)},backdrop)
+main.BackgroundTransparency=1
+local function section(parent,title,icon)
+ local item=parent:Section({Title=title,Icon=icon,TextSize=16,Box=true,BoxBorder=true,Opened=true})
+ item.HeaderSize=40
+ local frame=item.ElementFrame
+ frame.Image="";frame.ImageTransparency=1;frame.BackgroundColor3=Color3.fromHex("#1C1C1C");frame.BackgroundTransparency=.5
+ new("UIGradient",{Rotation=90,Color=ColorSequence.new(Color3.fromHex("#1C1C1C"),Color3.fromHex("#151515"))},frame)
+ if not frame:FindFirstChildOfClass("UICorner")then new("UICorner",{CornerRadius=UDim.new(0,8)},frame)end
+ new("UIStroke",{Color=Color3.fromHex("#3A3A3A"),Thickness=1,Transparency=.32,ApplyStrokeMode=Enum.ApplyStrokeMode.Border},frame)
+ local outline=frame:FindFirstChild("Outline");if outline then outline.Image="";outline.ImageTransparency=1;outline.BackgroundTransparency=1 end
+ return item
+end
 recorder:BuildPanel({Panel=Panel,Window=Window,WindUI=WindUI,new=new,
  columns=function(tab)local row=tab:HStack({});return row:VStack({}),row:VStack({})end,
- section=function(parent,title,icon)return parent:Section({Title=title,Icon=icon,TextSize=16,Box=true,BoxBorder=true,Opened=true})end})
+ section=section})
 Window:OnDestroy(function()state:Cleanup(true)end)
 Window:SelectTab(1)
 return state

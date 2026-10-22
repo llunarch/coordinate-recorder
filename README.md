@@ -7,7 +7,8 @@ No UmbrellaCat runtime, key system, AUT services, farming, movement or combat ho
 loadstring(game:HttpGet("https://raw.githubusercontent.com/llunarch/coordinate-recorder/main/main.lua"))()
 ```
 
-Right Ctrl toggles the menu. Fill Name and Description, then save a snapshot or
+Umbrella theme: graphite gray surfaces with restrained red accents.
+Right Shift toggles the menu. Fill Name and Description, then save a snapshot or
 Start Recording / Stop and Save. A snapshot during recording also adds a marker.
 Update Recording Notes changes the current route title/description.
 Copy Current Coordinates, Copy Last JSON and Copy Last File Path are available.
