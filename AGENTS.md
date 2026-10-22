@@ -8,3 +8,8 @@ preserve an explicitly configured custom bind. Keep standalone namespaces,
 GUI ownership, settings paths and cleanup isolated from other scripts.
 Do not publish recorded coordinates/account data. Public publication permission
 covers this recorder only, not private UmbrellaCat/Boundless runtime.
+
+Disable automatic localization on every UI root/text object. Use real full-width
+TextBoxes, never place editable text inside a clickable Button wrapper. Match
+compact32px controls, 40px section headers and8px section corners; avoid pill
+geometry or oversized default WindUI blocks. Verify input hit areas explicitly.

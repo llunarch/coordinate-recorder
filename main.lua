@@ -1,34 +1,9 @@
 --!nocheck
--- Standalone passive coordinate recorder; no AUT runtime or gameplay dependencies.
-local env=getgenv()
-local previous=env.__StandaloneCoordinateRecorder
+-- Standalone passive recorder. Own UI, no library, localization or gameplay hooks.
+local env=getgenv();local previous=env.__StandaloneCoordinateRecorder
 if previous and previous.Cleanup then previous:Cleanup()end
-local state={alive=true,connections={}}
-env.__StandaloneCoordinateRecorder=state
-local library=game:HttpGet("https://raw.githubusercontent.com/Footagesus/WindUI/1.6.66/dist/main.lua")
--- Give this library instance its own GUI names; never remove another script's UI.
-library=library:gsub('Name="WindUI','Name="CoordinateRecorder')
-local WindUI=assert(loadstring(library))()
-local theme=table.clone(WindUI:GetThemes().Dark)
-theme.Name="Umbrella"
-theme.Accent=Color3.fromHex("#1C1C1C")
-theme.Background=Color3.fromHex("#151515")
-theme.Dialog=Color3.fromHex("#1C1C1C")
-theme.Button=Color3.fromHex("#9B1E28")
-theme.Toggle=Color3.fromHex("#9B1E28")
-theme.Checkbox=Color3.fromHex("#9B1E28")
-theme.Text=Color3.fromHex("#EEEEEE")
-theme.ElementBackground=Color3.fromHex("#242424")
-theme.Primary=Color3.fromHex("#9B1E28")
-theme.Slider=theme.Primary
-theme.PanelBackground=Color3.fromHex("#151515")
-theme.PanelBackgroundTransparency=0
-theme.ElementBackgroundTransparency=0
-WindUI:AddTheme(theme)
-local Window=WindUI:CreateWindow({Title="Coordinate Recorder",Author="",Icon="map-pin",Folder="CoordinateRecorderUI",Size=UDim2.fromOffset(780,530),MinSize=Vector2.new(560,340),Theme="Umbrella",Transparent=false,SideBarWidth=196,ElementsRadius=8,Resizable=true,ToggleKey=Enum.KeyCode.RightShift,User={Enabled=false}})
-local Panel={alive=true,connections={}}
+local state={alive=true,connections={}};env.__StandaloneCoordinateRecorder=state
 local recorder=(function()
---!nocheck
 -- Passive owner-local survey data, never part of gameplay configs or source control.
 local S={};local p=game.Players.LocalPlayer
 local H=game:GetService("HttpService")
@@ -106,79 +81,100 @@ function R:Unload()
  local ok,err=pcall(function()self:Stop("Runtime unloaded")end)
  self.alive=false;if not ok then self.status=tostring(err)end
 end
-function R:BuildPanel(ctx)
- local tab=ctx.Window:Tab({Title="Test",Icon="map-pin"});ctx.Panel.testTab=tab
- local left,right=ctx.columns(tab);local points=ctx.section(left,"Coordinate Notes","map-pin");local recording=ctx.section(right,"Route Recording","route")
- local function textRow(section,name,height,editable)
-  local row=section:Button({Title="",Callback=function()end}).ElementFrame
-  for _,v in ipairs(row:GetChildren())do if v:IsA("GuiObject")then v.Visible=false end end
-  row.Size=UDim2.new(1,0,0,height);row.AutomaticSize=Enum.AutomaticSize.None
-  local input=ctx.new(editable and"TextBox"or"TextLabel",{Name=name,Text="",PlaceholderText=editable and name or nil,ClearTextOnFocus=editable and false or nil,MultiLine=editable and height>40 or nil,TextWrapped=true,TextSize=14,TextColor3=Color3.fromRGB(230,230,235),BackgroundTransparency=1,TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Top,Size=UDim2.new(1,-16,1,-12),Position=UDim2.fromOffset(8,6)},row)
-  if editable then input.ClearTextOnFocus=false end
-  return input
- end
- local title=textRow(points,"Name",40,true);local description=textRow(points,"Description",100,true)
- local status=textRow(recording,"RecorderStatus",78,false)
- local function action(fn)
-  local ok,result=pcall(fn);ctx.WindUI:Notify({Title="Test",Content=ok and tostring(result or"Done")or tostring(result),Duration=5})
- end
- points:Button({Title="Copy Current Coordinates",Icon="copy",Callback=function()action(function()local value=self:Coordinates();setclipboard(value);return value end)end})
- points:Button({Title="Save Snapshot / Add Marker",Icon="map-pin",Callback=function()action(function()return self:Snapshot(title.Text,description.Text)end)end})
- recording:Button({Title="Start Recording",Icon="play",Callback=function()action(function()self:Start(title.Text,description.Text);return "Recording every 0.5s; autosave every 5s"end)end})
- recording:Button({Title="Stop and Save",Icon="square",Callback=function()action(function()return self:Stop()or"No recording"end)end})
- recording:Button({Title="Update Recording Notes",Icon="pencil",Callback=function()action(function()return self:UpdateNotes(title.Text,description.Text)end)end})
- recording:Button({Title="Copy Last File Path",Icon="copy",Callback=function()action(function()setclipboard(assert(self.lastPath,"No saved file"));return self.lastPath end)end})
- recording:Button({Title="Copy Last JSON",Icon="copy",Callback=function()action(function()setclipboard(H:JSONEncode(assert(self.last,"No recording or snapshot")));return "JSON copied"end)end})
- local clock=0
- table.insert(ctx.Panel.connections,game:GetService("RunService").Heartbeat:Connect(function(dt)
-  if not ctx.Panel.alive then return end
-  self:Tick();clock+=dt;if clock<.25 then return end;clock=0
-  status.Text=self.status.."\n"..self.folder
- end))
-end
 return R
-
 end)()
 state.recorder=recorder
-function state:Cleanup(fromWindow)
+local Input=game:GetService("UserInputService");local Run=game:GetService("RunService")
+local colors={background=Color3.fromHex("#151515"),surface=Color3.fromHex("#1C1C1C"),element=Color3.fromHex("#242424"),border=Color3.fromHex("#3A3A3A"),accent=Color3.fromHex("#9B1E28"),text=Color3.fromHex("#EEEEEE"),muted=Color3.fromHex("#AAAAAA")}
+local function new(class,props,parent)
+ local o=Instance.new(class)
+ if o:IsA("GuiBase2d")then o.AutoLocalize=false end
+ if o:IsA("TextLabel")or o:IsA("TextButton")or o:IsA("TextBox")then o.Font=Enum.Font.BuilderSans;o.TextSize=14;o.TextColor3=colors.text;o.RichText=false end
+ for k,v in pairs(props)do o[k]=v end
+ o.Parent=parent;return o
+end
+local function connect(signal,fn)local c=signal:Connect(fn);state.connections[#state.connections+1]=c;return c end
+local function corner(o,r)new("UICorner",{CornerRadius=UDim.new(0,r)},o)end
+local gui=new("ScreenGui",{Name="CoordinateRecorderStandalone",ResetOnSpawn=false,IgnoreGuiInset=false,ZIndexBehavior=Enum.ZIndexBehavior.Sibling,DisplayOrder=80},gethui and gethui()or game:GetService("CoreGui"))
+local window=new("Frame",{Name="Window",Size=UDim2.fromOffset(800,510),AnchorPoint=Vector2.new(.5,.5),Position=UDim2.fromScale(.5,.5),BackgroundColor3=colors.background,BorderSizePixel=0,Active=true},gui)
+corner(window,12);new("UIStroke",{Color=colors.border,Thickness=1},window)
+local bar=new("Frame",{Name="Titlebar",Size=UDim2.new(1,0,0,42),BackgroundTransparency=1,Active=true},window)
+new("TextLabel",{Text="Coordinate Recorder",Font=Enum.Font.BuilderSansBold,TextXAlignment=Enum.TextXAlignment.Left,BackgroundTransparency=1,Position=UDim2.fromOffset(18,0),Size=UDim2.new(1,-110,1,0),Active=false},bar)
+new("Frame",{Name="Divider",Position=UDim2.new(0,16,0,42),Size=UDim2.new(1,-32,0,1),BackgroundColor3=colors.border,BackgroundTransparency=.55,BorderSizePixel=0},window)
+function state:Cleanup()
  if not self.alive then return end
- self.alive=false;Panel.alive=false
- recorder:Unload()
- for _,connection in ipairs(Panel.connections)do connection:Disconnect()end
- if not fromWindow then pcall(function()Window:Destroy()end)end
- for _,key in ipairs({"ScreenGui","NotificationGui","DropdownGui","TooltipGui"})do local gui=WindUI[key];if gui then pcall(function()gui:Destroy()end)end end
+ self.alive=false;recorder:Unload()
+ for _,c in ipairs(self.connections)do c:Disconnect()end
+ gui:Destroy()
  if env.__StandaloneCoordinateRecorder==self then env.__StandaloneCoordinateRecorder=nil end
 end
-local function new(class,properties,parent)
- local object=Instance.new(class)
- for key,value in pairs(properties)do object[key]=value end
- object.Parent=parent;return object
+local close=new("TextButton",{Name="Close",Text="×",TextSize=22,Size=UDim2.fromOffset(36,32),Position=UDim2.new(1,-43,0,5),BackgroundTransparency=1,AutoButtonColor=false},bar)
+connect(close.Activated,function()state:Cleanup()end)
+local hide=new("TextButton",{Name="Hide",Text="−",TextSize=22,Size=UDim2.fromOffset(36,32),Position=UDim2.new(1,-82,0,5),BackgroundTransparency=1,AutoButtonColor=false},bar)
+connect(hide.Activated,function()window.Visible=false end)
+local function section(title,left,height)
+ local frame=new("Frame",{Name=title,Position=UDim2.new(left and 0 or .5,left and 16 or 8,0,60),Size=UDim2.new(.5,-24,0,height),BackgroundColor3=colors.surface,BackgroundTransparency=.5,BorderSizePixel=0},window)
+ corner(frame,8);new("UIStroke",{Color=colors.border,Thickness=1,Transparency=.32},frame)
+ new("TextLabel",{Text=title,Font=Enum.Font.BuilderSansBold,TextXAlignment=Enum.TextXAlignment.Left,BackgroundTransparency=1,Position=UDim2.fromOffset(14,0),Size=UDim2.new(1,-28,0,40)},frame)
+ new("Frame",{Position=UDim2.new(0,1,0,39),Size=UDim2.new(1,-2,0,1),BackgroundColor3=colors.border,BackgroundTransparency=.58,BorderSizePixel=0},frame)
+ return frame
 end
-Window:SetBackgroundTransparency(0)
-Window:SetUIScale(1)
-Window.ElementConfig.UIPadding=8
-local main=Window.UIElements.Main
-local background=main:FindFirstChild("Background")
-local inner=Window.UIElements.MainBar:FindFirstChild("Background")
-if background then background.Visible=false end
-if inner then inner.Visible=false end
-local backdrop=new("Frame",{Name="UmbrellaBackdrop",BackgroundColor3=Color3.fromHex("#151515"),BorderSizePixel=0,Size=UDim2.fromScale(1,1),ZIndex=background and background.ZIndex or 0},main)
-new("UICorner",{CornerRadius=UDim.new(0,18)},backdrop)
-main.BackgroundTransparency=1
-local function section(parent,title,icon)
- local item=parent:Section({Title=title,Icon=icon,TextSize=16,Box=true,BoxBorder=true,Opened=true})
- item.HeaderSize=40
- local frame=item.ElementFrame
- frame.Image="";frame.ImageTransparency=1;frame.BackgroundColor3=Color3.fromHex("#1C1C1C");frame.BackgroundTransparency=.5
- new("UIGradient",{Rotation=90,Color=ColorSequence.new(Color3.fromHex("#1C1C1C"),Color3.fromHex("#151515"))},frame)
- if not frame:FindFirstChildOfClass("UICorner")then new("UICorner",{CornerRadius=UDim.new(0,8)},frame)end
- new("UIStroke",{Color=Color3.fromHex("#3A3A3A"),Thickness=1,Transparency=.32,ApplyStrokeMode=Enum.ApplyStrokeMode.Border},frame)
- local outline=frame:FindFirstChild("Outline");if outline then outline.Image="";outline.ImageTransparency=1;outline.BackgroundTransparency=1 end
- return item
+local points=section("Coordinate Notes",true,326);local routes=section("Route Recording",false,366)
+local function label(parent,text,y)
+ return new("TextLabel",{Text=text,TextColor3=colors.muted,TextXAlignment=Enum.TextXAlignment.Left,BackgroundTransparency=1,Position=UDim2.fromOffset(12,y),Size=UDim2.new(1,-24,0,22)},parent)
 end
-recorder:BuildPanel({Panel=Panel,Window=Window,WindUI=WindUI,new=new,
- columns=function(tab)local row=tab:HStack({});return row:VStack({}),row:VStack({})end,
- section=section})
-Window:OnDestroy(function()state:Cleanup(true)end)
-Window:SelectTab(1)
+local function textbox(parent,name,y,height,multiline)
+ local box=new("TextBox",{Name=name,Text="",PlaceholderText=name,PlaceholderColor3=colors.muted,ClearTextOnFocus=false,MultiLine=multiline,TextWrapped=multiline,TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=multiline and Enum.TextYAlignment.Top or Enum.TextYAlignment.Center,Position=UDim2.fromOffset(12,y),Size=UDim2.new(1,-24,0,height),BackgroundColor3=colors.element,BorderSizePixel=0,Active=true,Selectable=true,ZIndex=2},parent)
+ corner(box,6);new("UIPadding",{PaddingLeft=UDim.new(0,10),PaddingRight=UDim.new(0,10),PaddingTop=UDim.new(0,multiline and 8 or 0),PaddingBottom=UDim.new(0,multiline and 8 or 0)},box)
+ return box
+end
+label(points,"Name",48);local title=textbox(points,"Name",74,34,false)
+label(points,"Description",116);local description=textbox(points,"Description",142,94,true)
+local feedback=new("TextLabel",{Name="Feedback",Text="Right Shift: show / hide   •   Drag the title bar to move",TextColor3=colors.muted,TextWrapped=true,TextXAlignment=Enum.TextXAlignment.Left,BackgroundTransparency=1,Position=UDim2.new(0,18,1,-55),Size=UDim2.new(1,-42,0,42)},window)
+local function action(fn)
+ local ok,result=pcall(fn);feedback.Text=ok and tostring(result or"Done")or tostring(result);feedback.TextColor3=ok and colors.muted or Color3.fromRGB(255,140,140)
+end
+local function button(parent,text,y,fn,accent)
+ local b=new("TextButton",{Name=text,Text=text,Position=UDim2.fromOffset(12,y),Size=UDim2.new(1,-24,0,32),BackgroundColor3=accent and colors.accent or colors.element,BorderSizePixel=0,AutoButtonColor=false},parent)
+ corner(b,6)
+ connect(b.Activated,function()if state.alive then action(fn)end end)
+ connect(b.MouseEnter,function()b.BackgroundColor3=accent and Color3.fromHex("#B12632")or Color3.fromHex("#303030")end)
+ connect(b.MouseLeave,function()b.BackgroundColor3=accent and colors.accent or colors.element end)
+ return b
+end
+button(points,"Copy Coordinates",246,function()local value=recorder:Coordinates();setclipboard(value);return value end)
+button(points,"Save Snapshot / Marker",286,function()return recorder:Snapshot(title.Text,description.Text)end)
+local status=new("TextLabel",{Name="Status",Text="Ready",TextWrapped=true,TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Top,BackgroundTransparency=1,Position=UDim2.fromOffset(12,51),Size=UDim2.new(1,-24,0,68)},routes)
+button(routes,"Start Recording",126,function()recorder:Start(title.Text,description.Text);return "Recording every 0.5s; autosave every 5s"end,true)
+button(routes,"Stop and Save",166,function()return recorder:Stop()or"No active recording"end)
+button(routes,"Update Recording Notes",206,function()return recorder:UpdateNotes(title.Text,description.Text)end)
+button(routes,"Copy Last File Path",246,function()local path=assert(recorder.lastPath,"No saved file");setclipboard(path);return path end)
+button(routes,"Copy Last JSON",286,function()setclipboard(game:GetService("HttpService"):JSONEncode(assert(recorder.last,"No recording or snapshot")));return "JSON copied"end)
+label(routes,"Samples: 0.5s  •  Autosave: 5s",330)
+local resize=new("TextButton",{Name="Resize",Text="◢",TextSize=18,TextColor3=colors.accent,BackgroundTransparency=1,AnchorPoint=Vector2.new(1,1),Position=UDim2.fromScale(1,1),Size=UDim2.fromOffset(24,24)},window)
+local gesture
+local function begin(input,kind)
+ if input.UserInputType==Enum.UserInputType.MouseButton1 or input.UserInputType==Enum.UserInputType.Touch then gesture={kind=kind,input=input,start=input.Position,position=window.Position,size=window.Size}end
+end
+connect(bar.InputBegan,function(input)begin(input,"drag")end)
+connect(resize.InputBegan,function(input)begin(input,"resize")end)
+connect(Input.InputChanged,function(input)
+ local g=gesture;if not g then return end
+ if input.UserInputType~=Enum.UserInputType.MouseMovement and input~=g.input then return end
+ local delta=input.Position-g.start
+ if g.kind=="drag"then window.Position=UDim2.new(g.position.X.Scale,g.position.X.Offset+delta.X,g.position.Y.Scale,g.position.Y.Offset+delta.Y)
+ else local viewport=workspace.CurrentCamera.ViewportSize;window.Size=UDim2.fromOffset(math.clamp(g.size.X.Offset+delta.X,560,math.max(560,viewport.X-24)),math.clamp(g.size.Y.Offset+delta.Y,490,math.max(490,viewport.Y-24)))end
+end)
+connect(Input.InputEnded,function(input)if gesture and(input==gesture.input or input.UserInputType==Enum.UserInputType.MouseButton1)then gesture=nil end end)
+connect(Input.InputBegan,function(input,processed)
+ if input.KeyCode==Enum.KeyCode.RightShift and not processed and not Input:GetFocusedTextBox()then window.Visible=not window.Visible end
+end)
+local tick=0
+connect(Run.Heartbeat,function(dt)
+ if not state.alive then return end
+ recorder:Tick();tick+=dt;if tick<.25 then return end;tick=0
+ local message=recorder.status
+ if message:sub(1,6)=="Saved:"then message="Saved successfully"end
+ status.Text=message.."\n"..recorder.folder
+end)
 return state
