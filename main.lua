@@ -1,10 +1,10 @@
 --!nocheck
--- Standalone passive recorder. Own UI, no library, localization or gameplay hooks.
+-- Standalone observation recorder. Owned diagnostic tap; never changes gameplay arguments.
 local env=getgenv();local previous=env.__StandaloneCoordinateRecorder
 if previous and previous.Cleanup then previous:Cleanup()end
 local state={alive=true,connections={}};env.__StandaloneCoordinateRecorder=state
 local recorder=(function()
--- Passive owner-local survey data; no gameplay writes, global hooks or code capture.
+-- Passive owner-local survey data; no gameplay writes or code capture.
 local p=game:GetService("Players").LocalPlayer
 local H=game:GetService("HttpService")
 local Run=game:GetService("RunService")
@@ -32,6 +32,171 @@ local function ref(object)
  return {id=objectIds[object],name=object.Name,class=object.ClassName,path=ok and path:sub(1,200)or nil}
 end
 local function disconnect(list)for _,c in ipairs(list)do pcall(function()c:Disconnect()end)end;table.clear(list)end
+local diagnosticMethods={FireServer=true,InvokeServer=true,Destroy=true,Remove=true,SetAttribute=true,ChangeState=true,SetStateEnabled=true,
+ Move=true,MoveTo=true,LoadAnimation=true,Play=true,Stop=true,AdjustWeight=true,AdjustSpeed=true}
+local remoteMethods={FireServer=true,InvokeServer=true}
+local secretFields={key=true,token=true,password=true,secret=true,authorization=true,license=true,script_key=true,lp_key=true,webhook=true,url=true}
+local function packedValues(args)
+ local budget={entries=0,truncated=0};local seen={}
+ local function pack(v,depth,key)
+  if type(key)=="string"and(secretFields[key:lower()]or key:lower():find("token",1,true)or key:lower():find("password",1,true))then return {redacted=true}end
+  local t=typeof(v)
+  if t=="nil"then return {type="nil"}end
+  if t=="number"and(v~=v or math.abs(v)>=1e100)then return {type="number",nonfinite=tostring(v)}end
+  if t=="string"then
+   if #v<=64 and v:match("^[%a_][%w_ %.%-]*$")and not(#v>24 and not v:find(" ",1,true))then return v end
+   return {type="string",length=#v,redacted=true}
+  elseif t=="Instance"then return {type=t,object=ref(v)}
+  elseif t=="table"then
+   if depth<=0 or seen[v]then budget.truncated+=1;return {type="table",truncated=true}end
+   seen[v]=true;local out={type="table",entries={}}
+   for k,x in pairs(v)do
+    budget.entries+=1;if budget.entries>96 then budget.truncated+=1;break end
+    local safeKey=type(k)=="number"or type(k)=="string"and #k<=64
+    if safeKey then out.entries[#out.entries+1]={key=pack(k,0),value=pack(x,depth-1,k)}else budget.truncated+=1 end
+   end
+   return out
+  else local x=value(v);if x~=nil then return x end;return {type=t}end
+ end
+ local out={n=args.n,values={}}
+ for i=1,math.min(args.n,24)do out.values[i]=pack(args[i],4)end
+ if args.n>24 then budget.truncated+=args.n-24 end
+ out.truncated=budget.truncated;return out
+end
+function R:WantsCall(object,method)
+ if not diagnosticMethods[method]or typeof(object)~="Instance"then return false end
+ if remoteMethods[method]then return object:IsA("BaseRemoteEvent")or object:IsA("RemoteFunction")end
+ if object==self.character or object==self.humanoid or object==self.root or object==self.animator then return true end
+ if object:IsA("AnimationTrack")then return self.trackWatches and self.trackWatches[object]~=nil end
+ return (method=="Destroy"or method=="Remove"or method=="SetAttribute")and self.markerTimes and self.markerTimes[object]~=nil
+end
+function R:CaptureCall(object,method,args,executor,caller)
+ local stats=self.outbound;local now=os.clock()
+ if now-(stats.window or 0)>=1 then stats.window=now;stats.windowCount=0 end
+ stats.candidates+=1;stats.windowCount=(stats.windowCount or 0)+1
+ if stats.windowCount>1000 then stats.rateLimited+=1;return nil end
+ local name=object.Name:lower()
+ local sensitive=remoteMethods[method]and(name:find("key",1,true)or name:find("auth",1,true)or name:find("token",1,true)or name:find("license",1,true))
+ if method=="SetAttribute"and type(args[1])=="string"then sensitive=secretFields[args[1]:lower()]end
+ local started=now;local payload=sensitive and{redacted=true,n=args.n}or packedValues(args);stats.truncated+=payload.truncated or 0
+ stats.callSeq+=1;local id=stats.callSeq
+ self:Emit(remoteMethods[method]and"outbound_call"or"client_action",{callId=id,object=ref(object),method=method,executor=executor,caller=caller and ref(caller),arguments=payload})
+ stats.recorded+=1;if remoteMethods[method]then stats.remoteRecorded+=1 else stats.clientActions+=1 end;stats.maxCaptureMs=math.max(stats.maxCaptureMs,(os.clock()-started)*1000)
+ return id,sensitive~=nil and sensitive~=false
+end
+function R:InstallObservation()
+ self.outbound={requested=env.CoordinateRecorderOutbound~=false,directRequested=env.CoordinateRecorderDirectRemotes~=false,status="unsupported",seen=0,directSeen=0,candidates=0,recorded=0,remoteRecorded=0,clientActions=0,callSeq=0,errors=0,rateLimited=0,truncated=0,maxCaptureMs=0,direct={RemoteEvent="not_found",UnreliableRemoteEvent="not_found",RemoteFunction="not_found"}}
+ local stats=self.outbound
+ if not stats.requested then stats.status="disabled";return end
+ if type(hookmetamethod)~="function"or type(newcclosure)~="function"or type(getnamecallmethod)~="function"or type(setnamecallmethod)~="function"or type(getrawmetatable)~="function"then return end
+ local existing=env.__CoordinateRecorderDiagnosticTap
+ if existing and existing.version~=3 then stats.status="restart_required";return end
+ local tap=existing or{version=3,installed=false,busy=setmetatable({},{__mode="k"}),forwarding=setmetatable({},{__mode="k"}),methodWrappers={},wrapperCount=0}
+ tap.owner=self;self.tap=tap;env.__CoordinateRecorderDiagnosticTap=tap
+ local function forward(original,object,method,namecall,...)
+  if namecall then setnamecallmethod(method)end
+  return original(object,...)
+ end
+ local function dispatch(original,object,method,namecall,...)
+  local owner=tap.owner
+  if not owner or not owner.current then return forward(original,object,method,namecall,...)end
+  local s=owner.outbound
+  if not diagnosticMethods[method]then return forward(original,object,method,namecall,...)end
+  local thread=coroutine.running();if tap.busy[thread]or tap.forwarding[thread]then return forward(original,object,method,namecall,...)end
+  tap.busy[thread]=true
+  local session=owner.current;local callId;local sensitive;local caller;local executor;local args=table.pack(...)
+  local ok=pcall(function()
+   if not owner:WantsCall(object,method)then return end
+   if type(checkcaller)=="function"then executor=checkcaller()end
+   if type(getcallingscript)=="function"then local success,v=pcall(getcallingscript);if success then caller=v end end
+   callId,sensitive=owner:CaptureCall(object,method,args,executor,caller)
+  end)
+  tap.busy[thread]=nil;if not ok then s.errors+=1 end
+  if not callId then return forward(original,object,method,namecall,...)end
+  local began=os.clock();tap.forwarding[thread]=true
+  local results=table.pack(pcall(forward,original,object,method,namecall,...));tap.forwarding[thread]=nil
+  if owner.current==session then
+   tap.busy[thread]=true
+   local success=pcall(function()
+    if method=="InvokeServer"or not results[1]then
+     local response={n=results.n-1};for i=2,results.n do response[i-1]=results[i]end
+     local payload=sensitive and{redacted=true,n=response.n}or packedValues(response);s.truncated+=payload.truncated or 0
+     owner:Emit(remoteMethods[method]and"outbound_result"or"client_action_result",{callId=callId,ok=results[1],duration=os.clock()-began,result=payload})
+    elseif method=="LoadAnimation"and typeof(results[2])=="Instance"and results[2]:IsA("AnimationTrack")then owner:WatchAnimation(results[2],false)end
+   end)
+   tap.busy[thread]=nil;if not success then s.errors+=1 end
+  end
+  if not results[1]then error(results[2],0)end
+  return table.unpack(results,2,results.n)
+ end
+ tap.dispatch=dispatch
+ if not tap.installed then
+  local original
+  local hook=newcclosure(function(object,...)
+   local owner=tap.owner;if not owner or not owner.current then return original(object,...)end
+   owner.outbound.seen+=1
+   local method=getnamecallmethod();if not diagnosticMethods[method]then return original(object,...)end
+   return tap.dispatch(original,object,method,true,...)
+  end)
+  local ok,result=pcall(function()return hookmetamethod(game,"__namecall",hook)end)
+  if not ok then stats.status="install_failed";stats.errors+=1;return end
+  original=result;tap.original=original;tap.hook=hook;tap.installed=true
+ end
+ stats.status="installed"
+ if stats.directRequested and not tap.indexInstalled then
+  local originalIndex
+  local hook=newcclosure(function(object,key)
+   local result=originalIndex(object,key);local owner=tap.owner
+   if not owner or not owner.current or not owner.outbound.directRequested or not remoteMethods[key]or type(result)~="function"then return result end
+   local class=originalIndex(object,"ClassName")
+   if class~="RemoteEvent"and class~="RemoteFunction"and class~="UnreliableRemoteEvent"then return result end
+   local wrapper=tap.methodWrappers[result]
+   if wrapper then return wrapper end
+   if tap.wrapperCount>=16 then owner.outbound.direct[class]="wrapper_limit";return result end
+   wrapper=newcclosure(function(remote,...)
+    local r=tap.owner;if not r or not r.current or not r.outbound.directRequested then return result(remote,...)end
+    r.outbound.directSeen+=1;r.outbound.direct[class]="observed"
+    return tap.dispatch(result,remote,key,false,...)
+   end)
+   tap.wrapperCount+=1;tap.methodWrappers[result]=wrapper;return wrapper
+  end)
+  local ok,mt=pcall(getrawmetatable,game)
+  if ok and mt and type(mt.__index)=="function"then
+   local success,result=pcall(hookmetamethod,game,"__index",hook)
+   if success then originalIndex=result;tap.indexOriginal=result;tap.indexHook=hook;tap.indexInstalled=true else stats.errors+=1 end
+  end
+ end
+end
+function R:ObserveDirectRemote(remote)
+ local tap=self.tap;if not tap or not self.outbound.requested then return end
+ local class=remote.ClassName;local method=class=="RemoteFunction"and"InvokeServer"or"FireServer"
+ if class~="RemoteFunction"and class~="RemoteEvent"and class~="UnreliableRemoteEvent"then return end
+ local stats=self.outbound
+ if not stats.directRequested then stats.direct[class]="disabled";return end
+ if not tap.indexInstalled then stats.direct[class]="unsupported";return end
+ if stats.direct[class]~="observed"then stats.direct[class]="future_lookups"end
+end
+function R:CheckObservation()
+ local stats=self.outbound;if not stats or not self.tap then return end
+ local ok,mt=pcall(getrawmetatable,game);local progressed=stats.seen>(self.lastTapSeen or 0);self.lastTapSeen=stats.seen
+ local status=ok and mt and mt.__namecall==self.tap.hook and"installed"or(progressed and"observing_chain"or"chain_unverified")
+ if stats.status~=status then stats.status=status;self:Emit("capture_coverage",{outbound=stats})end
+end
+function R:DetachObservation()
+ local tap=self.tap;if not tap or tap.owner~=self then return end
+ if self.outbound then self.outbound.statusBeforeStop=self.outbound.status;self.outbound.directBeforeStop=table.clone(self.outbound.direct)end
+ tap.owner=nil;local ok,mt=pcall(getrawmetatable,game)
+ -- Existing proxies become pass-throughs. Never replace shared native C functions.
+ if ok and mt and mt.__index==tap.indexHook and tap.indexInstalled then
+  if pcall(hookmetamethod,game,"__index",tap.indexOriginal)then tap.indexInstalled=false end
+ end
+ if self.outbound then for class in pairs(self.outbound.direct)do self.outbound.direct[class]="detached"end end
+ if ok and mt and mt.__namecall==tap.hook then
+  local restored=pcall(hookmetamethod,game,"__namecall",tap.original)
+  if restored then tap.installed=false;if self.outbound then self.outbound.status="restored"end end
+ elseif self.outbound then self.outbound.status="detached_passthrough"end
+ self.tap=nil
+end
 function R:Connect(signal,fn,character)
  local c=signal:Connect(function(...)local ok=pcall(fn,...);if not ok then self.callbackErrors=(self.callbackErrors or 0)+1 end end)
  table.insert(character and self.characterConnections or self.connections,c);return c
@@ -60,7 +225,7 @@ function R:Save(data)
  local path=self.folder.."/"..data.id..(data.kind=="route"and".manifest.json"or".json")
  if data.kind=="route"then
   data.counters={samples=self.samples,rowsWritten=self.rows,sequence=self.seq,dropped=self.dropped,writeErrors=self.writeErrors,
-   encodeErrors=self.encodeErrors,appendVerified=self.appendVerified==true,callbackErrors=self.callbackErrors or 0,uiErrors=self.uiErrors or 0,pendingRows=#self.queue,pendingBytes=self.queuedBytes}
+   encodeErrors=self.encodeErrors,appendVerified=self.appendVerified==true,callbackErrors=self.callbackErrors or 0,uiErrors=self.uiErrors or 0,pendingRows=#self.queue,pendingBytes=self.queuedBytes,outbound=self.outbound,trackWatchLimited=self.trackWatchLimited or 0,forceEventLimited=self.forceEventLimited or 0}
  end
  self.last=data;self.lastPath=data.dataPath or path
  writefile(path,H:JSONEncode(data));return self.lastPath
@@ -122,7 +287,7 @@ function R:Snapshot(title,description)
  end
  return path
 end
-local forceProperties={"Enabled","Active","Position","CFrame","Velocity","AngularVelocity","VectorVelocity","PlaneVelocity","PrimaryTangentAxis","SecondaryTangentAxis","LineDirection","LineVelocity","Force","Torque","MaxForce","MaxTorque","MaxVelocity","MaxAngularVelocity","Responsiveness","P","D","RelativeTo","VelocityConstraintMode","ForceLimitsEnabled","RigidityEnabled","Mode","ApplyAtCenterOfMass"}
+local forceProperties={"Enabled","Active","Position","CFrame","Velocity","AngularVelocity","VectorVelocity","PlaneVelocity","PrimaryTangentAxis","SecondaryTangentAxis","LineDirection","LineVelocity","Force","Torque","MaxForce","MaxAxesForce","ForceLimitMode","ForceRelativeTo","MaxTorque","MaxVelocity","MaxAngularVelocity","Responsiveness","P","D","RelativeTo","VelocityConstraintMode","ForceLimitsEnabled","RigidityEnabled","Mode","ApplyAtCenterOfMass"}
 local function isForce(o)return o:IsA("BodyMover")or o:IsA("Constraint")end
 function R:Force(o)
  local data=ref(o);data.properties={}
@@ -133,6 +298,25 @@ function R:Force(o)
   if a then data.attachments[name]={object=ref(a),position=value(read(a,"Position")),worldPosition=value(read(a,"WorldPosition")),worldCFrame=value(read(a,"WorldCFrame"))}end
  end
  return data
+end
+function R:ClearForceWatches()
+ for _,connections in pairs(self.forceWatches or{})do disconnect(connections)end;self.forceWatches={}
+end
+function R:WatchForce(o)
+ if self.forceWatches[o]or not(o:IsA("BodyMover")or o:IsA("LinearVelocity")or o:IsA("AlignPosition")or o:IsA("AlignOrientation")or o:IsA("VectorForce"))then return end
+ local count=0;for _ in pairs(self.forceWatches)do count+=1 end;if count>=32 then return end
+ local connections={};self.forceWatches[o]=connections
+ for _,name in ipairs({"Enabled","MaxForce","MaxAxesForce","RigidityEnabled","Position","Velocity","PlaneVelocity","CFrame"})do
+  if read(o,name)~=nil then
+   local ok,signal=pcall(function()return o:GetPropertyChangedSignal(name)end)
+   if ok then connections[#connections+1]=signal:Connect(function()
+    local now=os.clock();if now-(self.forceEventWindow or 0)>=1 then self.forceEventWindow=now;self.forceEventCount=0 end
+    self.forceEventCount=(self.forceEventCount or 0)+1
+    if self.forceEventCount>300 then self.forceEventLimited=(self.forceEventLimited or 0)+1;return end
+    self:Emit("force_property",{object=ref(o),property=name,value=value(read(o,name))})
+   end)end
+  end
+ end
 end
 function R:WatchTool(tool)
  if not tool:IsA("Tool")or self.toolSeen[tool]then return end
@@ -149,31 +333,83 @@ function R:WatchNpc(n)
  local entry={connections={},hp=n.h.Health};self.npcWatches[n.model]=entry
  local function emit(kind,data)if self.current then data.object=ref(n.model);self:Emit(kind,data)end end
  entry.connections[#entry.connections+1]=n.h.HealthChanged:Connect(function(hp)
-  local old=entry.hp;entry.hp=hp;emit("npc_health",{health=number(hp),previous=number(old),delta=number(hp-old),p=vec(n.root.Position),note="HP change; attribution to player not established"})
+  local old=entry.hp;entry.hp=hp;local root=self.character and self.character:FindFirstChild("HumanoidRootPart");local head=n.model:FindFirstChild("Head")
+  emit("npc_health",{health=number(hp),previous=number(old),delta=number(hp-old),p=vec(n.root.Position),cf=frame(n.root.CFrame),localRoot=root and frame(root.CFrame),relative=root and vec(n.root.Position-root.Position),distance=root and(n.root.Position-root.Position).Magnitude,head=head and{p=vec(head.Position),size=vec(head.Size)},state=n.h:GetState().Name,npcId=n.model:GetAttribute("NPCID"),note="HP change; attribution to player not established"})
  end)
  entry.connections[#entry.connections+1]=n.h.StateChanged:Connect(function(a,b)emit("npc_state",{from=a.Name,to=b.Name,p=vec(n.root.Position)})end)
 end
 function R:ClearNpcs()
  for _,entry in pairs(self.npcWatches or{})do disconnect(entry.connections)end;self.npcWatches={}
 end
-local function movementName(name)return name:lower():find("climb")or name:lower():find("vault")or name:lower():find("stun")or name:lower():find("ragdoll")or name:lower():find("dazed")or name:lower():find("knock")or name:lower():find("sprint")or name:lower():find("jump")or name:lower():find("swim")or name:lower():find("speed")end
+local function movementName(name)return name:lower():find("climb")or name:lower():find("vault")or name:lower():find("stun")or name:lower():find("ragdoll")or name:lower():find("dazed")or name:lower():find("disable")or name:lower():find("knock")or name:lower():find("sprint")or name:lower():find("jump")or name:lower():find("swim")or name:lower():find("speed")end
+function R:ClearTracks()
+ for _,entry in pairs(self.trackWatches or{})do disconnect(entry.connections)end;self.trackWatches={}
+end
+function R:WatchAnimation(track,started)
+ local animation=read(track,"Animation")
+ if started then self:Emit("animation_started",{object=ref(track),id=animation and animation.AnimationId,name=track.Name,priority=tostring(track.Priority),speed=track.Speed,weight=track.WeightCurrent})end
+ if self.trackWatches[track]then return end
+ local count=0;for _ in pairs(self.trackWatches)do count+=1 end
+ if count>=64 then self.trackWatchLimited=(self.trackWatchLimited or 0)+1;return end
+ local entry={connections={}};self.trackWatches[track]=entry
+ for _,name in ipairs({"Stopped","Ended","DidLoop"})do
+  local signal=read(track,name)
+  if signal then entry.connections[#entry.connections+1]=signal:Connect(function()
+   self:Emit("animation_lifecycle",{object=ref(track),event=name,id=animation and animation.AnimationId,position=track.TimePosition,speed=track.Speed,weight=track.WeightCurrent,targetWeight=track.WeightTarget,playing=track.IsPlaying})
+   if name=="Stopped"then entry.stoppedAt=os.clock()elseif name=="Ended"then disconnect(entry.connections);self.trackWatches[track]=nil end
+  end)end
+ end
+end
+function R:ControlFrame(h,root)
+ local reasons={};local c=self.character
+ for _,name in ipairs({"Stun","Dazed","ragdoll","Ragdoll","Disable"})do if c:FindFirstChild(name)then reasons[#reasons+1]=name end end
+ if h.WalkSpeed<=0 then reasons[#reasons+1]="zero_speed"end
+ if h.PlatformStand then reasons[#reasons+1]="PlatformStand"end;if h.Sit then reasons[#reasons+1]="Sit"end
+ local key=table.concat(reasons,",");local now=os.clock();local blocked=#reasons>0
+ if key~=self.controlKey then
+  self:Emit("control_transition",{blocked=blocked,reasons=reasons,walkSpeed=h.WalkSpeed,health=h.Health,state=h:GetState().Name,damageEpisode=self.injury and self.injury.id})
+  if blocked and not self.controlBlockedAt then
+   self.controlBlockedAt=now;self.controlSerial=(self.controlSerial or 0)+1
+   if self.recovery then self:Emit("control_recovery",{id=self.recovery.id,phase="interrupted"});self.recovery=nil end
+  elseif not blocked and self.controlBlockedAt then
+   self.recovery={id=self.controlSerial,released=now};self:Emit("control_recovery",{id=self.controlSerial,phase="released",observedBlockedDuration=now-self.controlBlockedAt});self.controlBlockedAt=nil
+  end
+  self.controlKey=key
+ end
+ if self.recovery and not blocked then
+  local pending=self.recovery
+  if h.MoveDirection.Magnitude>.1 and not pending.intent then pending.intent=true;self:Emit("control_recovery",{id=pending.id,phase="direction_intent",delay=now-pending.released})end
+  local velocity=root.AssemblyLinearVelocity
+  if Vector3.new(velocity.X,0,velocity.Z).Magnitude>1 then self:Emit("control_recovery",{id=pending.id,phase="horizontal_motion",delay=now-pending.released,note="Observed motion; may include external impulses"});self.recovery=nil
+  elseif now-pending.released>10 then self:Emit("control_recovery",{id=pending.id,phase="no_motion_10s"});self.recovery=nil end
+ end
+end
 function R:Bind(character)
- disconnect(self.characterConnections);self:ClearNpcs();self.toolSeen=setmetatable({},{__mode="k"});self.toolWatchCount=0;self.motionWindow=nil;self.injury=nil;self.previousGoal=nil
+ disconnect(self.characterConnections);self:ClearNpcs();self:ClearTracks();self:ClearForceWatches();self.markerTimes=setmetatable({},{__mode="k"});self.controlKey=nil;self.controlBlockedAt=nil;self.recovery=nil
+ self.toolSeen=setmetatable({},{__mode="k"});self.toolWatchCount=0;self.motionWindow=nil;self.injury=nil;self.previousGoal=nil
  self.character=character;self.epoch=(self.epoch or 0)+1;self.lastFrame=nil;self.forces={}
  self:Emit("character",{available=character~=nil})
  if not character then return end
- for _,o in ipairs(character:GetDescendants())do if isForce(o)then self.forces[o]=true end end
+ for _,o in ipairs(character:GetDescendants())do if isForce(o)then self.forces[o]=true;self:WatchForce(o)elseif movementName(o.Name)then self.markerTimes[o]=os.clock()end end
+ local function attributes(object)
+  local signal=read(object,"AttributeChanged")
+  if signal then self:Connect(signal,function(name)if movementName(name)then self:Emit("attribute_changed",{object=ref(object),attribute=name,value=value(object:GetAttribute(name))})end end,true)end
+ end
+ attributes(character)
  self:Connect(character.DescendantAdded,function(o)
   self:WatchTool(o)
-  if isForce(o)then self.forces[o]=true;self:Emit("force_added",self:Force(o))
-  elseif movementName(o.Name)then self:Emit("marker_added",{object=ref(o),value=value(read(o,"Value")),damageEpisode=self.injury and self.injury.id})end
+  if isForce(o)then self.forces[o]=true;self:WatchForce(o);self:Emit("force_added",self:Force(o))
+  elseif movementName(o.Name)then self.markerTimes[o]=os.clock();self:Emit("marker_added",{object=ref(o),value=value(read(o,"Value")),damageEpisode=self.injury and self.injury.id})end
  end,true)
  self:Connect(character.DescendantRemoving,function(o)
-  if self.forces[o]then self:Emit("force_removed",{object=ref(o)});self.forces[o]=nil
-  elseif movementName(o.Name)then self:Emit("marker_removed",{object=ref(o),damageEpisode=self.injury and self.injury.id})end
+  if self.forces[o]then self:Emit("force_removed",{object=ref(o)});self.forces[o]=nil;if self.forceWatches[o]then disconnect(self.forceWatches[o]);self.forceWatches[o]=nil end
+  elseif movementName(o.Name)then self:Emit("marker_removed",{object=ref(o),lifetime=self.markerTimes[o]and os.clock()-self.markerTimes[o],damageEpisode=self.injury and self.injury.id});self.markerTimes[o]=nil end
  end,true)
  local h=character:FindFirstChildOfClass("Humanoid")
+ self.humanoid=h;self.root=character:FindFirstChild("HumanoidRootPart");self.animator=nil
+ if self.root then attributes(self.root)end
  if h then
+  attributes(h)
   self:Connect(h.StateChanged,function(a,b)self:Emit("humanoid_state",{from=a.Name,to=b.Name})end,true)
   local lastHp=h.Health
   self:Connect(h.HealthChanged,function(hp)
@@ -187,9 +423,10 @@ function R:Bind(character)
    self:Connect(h:GetPropertyChangedSignal(name),function()self:Emit("humanoid_property",{property=name,value=value(read(h,name))})end,true)
   end
   local animator=h:FindFirstChildOfClass("Animator")
-  if animator then self:Connect(animator.AnimationPlayed,function(track)
-   local animation=read(track,"Animation");self:Emit("animation_started",{id=animation and animation.AnimationId,name=track.Name,priority=tostring(track.Priority),speed=track.Speed})
-  end,true)end
+  if animator then self.animator=animator
+   for _,track in ipairs(animator:GetPlayingAnimationTracks())do self:WatchAnimation(track,false)end
+   self:Connect(animator.AnimationPlayed,function(track)self:WatchAnimation(track,true)end,true)
+  end
  end
  local backpack=p:FindFirstChild("Backpack")
  if backpack then
@@ -210,6 +447,7 @@ function R:Frame(dt)
  local root=c and c:FindFirstChild("HumanoidRootPart");local h=c and c:FindFirstChildOfClass("Humanoid")
  if not root or not h then return end
  local now=os.clock();local pos=root.Position
+ self:ControlFrame(h,root)
  local elapsed=self.lastFrame and now-self.lastFrame.t or 0
  local displacement=self.lastFrame and elapsed>0 and (pos-self.lastFrame.p)/elapsed or Vector3.zero
  self:Emit("frame",{dt=number(dt or elapsed),p=vec(pos),cf=frame(root.CFrame),v=vec(root.AssemblyLinearVelocity),av=vec(root.AssemblyAngularVelocity),measured=vec(displacement),
@@ -239,6 +477,7 @@ end
 function R:Medium()
  local c=self.character;local root=c and c:FindFirstChild("HumanoidRootPart");local h=c and c:FindFirstChildOfClass("Humanoid")
  if not root or not h then return end
+ for track,entry in pairs(self.trackWatches)do if entry.stoppedAt and os.clock()-entry.stoppedAt>1 then disconnect(entry.connections);self.trackWatches[track]=nil end end
  local data={forces={},animations={},attributes={},keys={},combatMarkers={},tools={},focused=self.focused~=false,damageEpisode=self.injury and self.injury.id}
  for _,o in ipairs(c:GetChildren())do
   if movementName(o.Name)or o.Name:lower():find("block")or o.Name:lower():find("attack")then
@@ -333,7 +572,9 @@ end
 function R:ObserveRemotes()
  local folder=Storage:FindFirstChild("Events");if not folder then return end
  self.remoteSeen=self.remoteSeen or setmetatable({},{__mode="k"})
- for _,remote in ipairs(folder:GetDescendants())do if not self.remoteSeen[remote]and(remote:IsA("RemoteEvent")or remote:IsA("UnreliableRemoteEvent"))then
+ for _,remote in ipairs(folder:GetDescendants())do
+  self:ObserveDirectRemote(remote)
+  if not self.remoteSeen[remote]and(remote:IsA("RemoteEvent")or remote:IsA("UnreliableRemoteEvent"))then
   local name=remote.Name:lower();local wanted=false;for _,word in ipairs(remoteWords)do if name:find(word,1,true)then wanted=true;break end end
   if wanted then
    self.remoteSeen[remote]=true
@@ -351,19 +592,21 @@ function R:Start(title,description)
  assert(type(appendfile)=="function","Executor appendfile support is required")
  self:EnsureFolder();local data=self:New("route",title,description)
  data.state="recording";data.format="jsonl";data.dataPath=self.folder.."/"..data.id..".jsonl"
- data.capture={frames="every Heartbeat",detailsHz=10,gameStateHz=1,geometryProbes=7,nearbyNpcLimit=12,npcHealth="event driven for nearest 12; discovery 1Hz",toolActions=true,motionWindows=.2,forceAttachments=true,inboundRemotes="filtered names; strings redacted",outboundRemotes=false,keyNames=keyNames,maxQueueBytes=self.maxQueueBytes}
+ data.capture={frames="every Heartbeat",detailsHz=10,gameStateHz=1,geometryProbes=7,nearbyNpcLimit=12,npcHealth="event driven for nearest 12; discovery 1Hz",toolActions=true,motionWindows=.2,forceAttachments=true,inboundRemotes="filtered names; strings redacted",outboundRemotes=true,executorCallsIncluded=true,invokeResults=true,preexistingCachedCalls=false,animationLifecycle=true,controlTransitions=true,propertyWriteCaller=false,arbitraryLuaCalls=false,keyNames=keyNames,maxQueueBytes=self.maxQueueBytes,argumentLimits={depth=4,entries=96,args=24},maxDiagnosticCallsPerSecond=1000}
  writefile(data.dataPath,"")
  self.queue={};self.queuedBytes=0;self.seq=0;self.rows=0;self.samples=0;self.dropped=0;self.writeErrors=0;self.encodeErrors=0;self.callbackErrors=0
- self.appendVerified=false;self.current=data;self.started=os.clock();self.mediumAt=0;self.slowAt=0;self.remoteAt=0;self.saveAt=0;self.epoch=0
+ self.appendVerified=false;self.lastTapSeen=0;self.current=data;self.started=os.clock();self.mediumAt=0;self.slowAt=0;self.remoteAt=0;self.saveAt=0;self.epoch=0
+ self:InstallObservation();data.capture.outboundRemotes=self.outbound.requested;data.capture.outboundInitialStatus=self.outbound.status
  self:Emit("session_start",{placeId=game.PlaceId,universeId=game.GameId,jobId=game.JobId,createdAt=data.createdAt,capture=data.capture})
- self:Bind(p.Character);self:ObserveRemotes();self:Save(data)
+ self:Bind(p.Character);self:ObserveRemotes();self:Emit("capture_coverage",{outbound=self.outbound});self:Save(data)
  self.status="Recording (until Stop)"
  return data.dataPath
 end
 function R:Stop(reason)
  local data=self.current;if not data then return self.lastPath end
+ self:DetachObservation()
  self:Emit("session_stop",{reason=reason or "User Stop"});data.state="stopped";data.stopReason=reason or "User Stop";data.finishedAt=os.time();data.duration=os.clock()-self.started
- self.current=nil;self.finishing=data;disconnect(self.characterConnections);self:ClearNpcs();self.character=nil;self.forces={}
+ self.current=nil;self.finishing=data;disconnect(self.characterConnections);self:ClearNpcs();self:ClearTracks();self:ClearForceWatches();self.character=nil;self.forces={}
  self:Flush();self:Save(data)
  if #self.queue==0 and not self.flushing then self.finishing=nil end
  self.status=#self.queue==0 and "Stopped and saved"or "Stopped; waiting for disk write"
@@ -379,9 +622,9 @@ function R:Tick(dt)
  local ok=pcall(function()
   self:Frame(dt);local now=os.clock()
   if now-self.mediumAt>=.1 then self.mediumAt=now;self:Medium()end
-  if now-self.slowAt>=1 then self.slowAt=now;self:Slow()end
+  if now-self.slowAt>=1 then self.slowAt=now;self:Slow();self:CheckObservation()end
   if now-self.remoteAt>=5 then self.remoteAt=now;self:ObserveRemotes()end
-  self.status=string.format("Recording: %d frames / %ds | lost %d | disk errors %d",self.samples,now-self.started,self.dropped,self.writeErrors)
+  self.status=string.format("REC %d frames | remote %d | %s | lost %d | I/O %d",self.samples,self.outbound.remoteRecorded,self.outbound.status,self.dropped,self.writeErrors)
  end)
  if not ok then self.callbackErrors+=1;self.status="Recording; sample errors: "..self.callbackErrors end
 end
