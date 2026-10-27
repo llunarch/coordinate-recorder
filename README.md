@@ -34,3 +34,8 @@ python analyze_recording.py /path/to/session.jsonl
 ```
 
 Offline tests exercise the actual embedded backend: frames/false properties, redacted server receipts, snapshot/markers/notes,8000+frames,respawn,ten-hour time advance,disk retry,bounded backlog and teardown. These tests do not prove compatibility with every executor or third-party hub. Requires writefile/appendfile/readfile/isfolder/makefolder/getgenv and setclipboard for Copy buttons.
+# Extended passive combat and movement recording
+
+Tool Activated/Deactivated/Equipped/Unequipped signals are recorded separately from input and animation observations. These are attempts/state changes, not proof of a server-accepted attack. The nearest 12 NPCs are discovered once per second, with event-driven HP/state listeners while tracked; an HP decrease does not identify its attacker. A native Tool signal may be absent when a hub invokes combat directly. No outgoing remote interception or global hook is installed.
+
+Movement includes 0.2-second path-speed windows, potential stalls (forward intent with speed below 1), changed WalkToPoint destinations, LinearVelocity plane/line settings and both constraint attachments' local/world positions. Windows include setup/transitions and are not a universal route benchmark. Damage events have IDs, HP deltas, associated marker events, nearby detail samples and an after-two-seconds observation; a new hit supersedes the previous pending follow-up. Rebind/Stop clears listeners and windows. Tool subscriptions are capped at 64 per character, NPCs at 12 concurrently. Existing JSONL files remain readable; these fields appear only in new captures.

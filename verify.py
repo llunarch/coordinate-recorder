@@ -85,6 +85,21 @@ remote.OnClientEvent:Fire("Start",{Method="Craft",Secret="DO_NOT_CAPTURE"},"DO_N
 R:Flush();local receipt=disk[path]
 assert(receipt:find('"kind":"server_event"',1,true)and not receipt:find('DO_NOT_CAPTURE',1,true),"inbound payload leaked unrelated strings")
 hum.StateChanged:Fire({Name="Running"},{Name="Climbing"});hum.WalkSpeed=40;hum:GetPropertyChangedSignal("WalkSpeed"):Fire()
+-- Observe actual signals without firing a weapon or touching a remote.
+local tool=object("TestRifle","Tool");tool.Activated=signal();tool.Deactivated=signal();tool.Equipped=signal();tool.Unequipped=signal();tool.Enabled=true
+R:WatchTool(tool);R:WatchTool(tool);tool.Activated:Fire();tool.Deactivated:Fire()
+local npc,rootNpc,hNpc=character();npc.Name="Bandit"
+R:WatchNpc({model=npc,h=hNpc,root=rootNpc});R:WatchNpc({model=npc,h=hNpc,root=rootNpc})
+hNpc.HealthChanged:Fire(95);hNpc.StateChanged:Fire({Name="Running"},{Name="FallingDown"})
+hum.HealthChanged:Fire(96);now+=.25;R:Tick(.25);now+=2;R:Tick(.02)
+local attachment=object("ClimbSurface","Attachment");attachment.Position=v(1,2,3);attachment.WorldPosition=v(4,5,6)
+local force=object("Velocity","LinearVelocity");force.Attachment0=attachment;force.PrimaryTangentAxis=v(1,0,0);force.PlaneVelocity=setmetatable({X=43,Y=0},{__type="Vector2"})
+local forceData=R:Force(force);assert(forceData.properties.PlaneVelocity[1]==43 and forceData.attachments.Attachment0.worldPosition[2]==5)
+R:Flush();local extended=disk[path]
+for _,kind in ipairs({"tool_action","npc_health","npc_state","damage_episode","motion_window","walk_goal"})do assert(extended:find('"kind":"'..kind..'"',1,true),"missing "..kind)end
+assert(extended:find('"delta":-5',1,true)and extended:find('"phase":"after_2s"',1,true))
+local before=R.seq;R:ClearNpcs();hNpc.HealthChanged:Fire(90);assert(R.seq==before,"NPC listener survived cleanup")
+for i=1,80 do R:WatchTool(object("extra"..i,"Tool"))end;assert(R.toolWatchCount==64,"unbounded tool listeners")
 R:Snapshot("Wall","Start climbing");assert(#R.current.markers==1)
 R:UpdateNotes("Castle","Walk and climb");assert(R.current.title=="Castle")
 for i=1,8000 do now+=.02;R:Tick(.02);if i%50==0 then assert(R:Flush());disk[path]=""end end

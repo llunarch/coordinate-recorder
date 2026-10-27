@@ -122,31 +122,67 @@ function R:Snapshot(title,description)
  end
  return path
 end
-local forceProperties={"Enabled","Active","Position","CFrame","Velocity","AngularVelocity","VectorVelocity","Force","Torque","MaxForce","MaxTorque","MaxVelocity","MaxAngularVelocity","Responsiveness","P","D","RelativeTo","VelocityConstraintMode","ForceLimitsEnabled","RigidityEnabled","Mode","ApplyAtCenterOfMass"}
+local forceProperties={"Enabled","Active","Position","CFrame","Velocity","AngularVelocity","VectorVelocity","PlaneVelocity","PrimaryTangentAxis","SecondaryTangentAxis","LineDirection","LineVelocity","Force","Torque","MaxForce","MaxTorque","MaxVelocity","MaxAngularVelocity","Responsiveness","P","D","RelativeTo","VelocityConstraintMode","ForceLimitsEnabled","RigidityEnabled","Mode","ApplyAtCenterOfMass"}
 local function isForce(o)return o:IsA("BodyMover")or o:IsA("Constraint")end
 function R:Force(o)
  local data=ref(o);data.properties={}
  for _,name in ipairs(forceProperties)do local v=value(read(o,name));if v~=nil then data.properties[name]=v end end
+ data.attachments={}
+ for _,name in ipairs({"Attachment0","Attachment1"})do
+  local a=read(o,name)
+  if a then data.attachments[name]={object=ref(a),position=value(read(a,"Position")),worldPosition=value(read(a,"WorldPosition")),worldCFrame=value(read(a,"WorldCFrame"))}end
+ end
  return data
+end
+function R:WatchTool(tool)
+ if not tool:IsA("Tool")or self.toolSeen[tool]then return end
+ if self.toolWatchCount>=64 then return end;self.toolWatchCount+=1
+ self.toolSeen[tool]=true
+ for _,name in ipairs({"Activated","Deactivated","Equipped","Unequipped"})do
+  local signal=read(tool,name)
+  if signal then self:Connect(signal,function()self:Emit("tool_action",{tool=ref(tool),action=name,enabled=read(tool,"Enabled"),requiresHandle=read(tool,"RequiresHandle")})end,true)end
+ end
+end
+function R:WatchNpc(n)
+ if self.npcWatches[n.model]then return end
+ local count=0;for _ in pairs(self.npcWatches)do count+=1 end;if count>=12 then return end
+ local entry={connections={},hp=n.h.Health};self.npcWatches[n.model]=entry
+ local function emit(kind,data)if self.current then data.object=ref(n.model);self:Emit(kind,data)end end
+ entry.connections[#entry.connections+1]=n.h.HealthChanged:Connect(function(hp)
+  local old=entry.hp;entry.hp=hp;emit("npc_health",{health=number(hp),previous=number(old),delta=number(hp-old),p=vec(n.root.Position),note="HP change; attribution to player not established"})
+ end)
+ entry.connections[#entry.connections+1]=n.h.StateChanged:Connect(function(a,b)emit("npc_state",{from=a.Name,to=b.Name,p=vec(n.root.Position)})end)
+end
+function R:ClearNpcs()
+ for _,entry in pairs(self.npcWatches or{})do disconnect(entry.connections)end;self.npcWatches={}
 end
 local function movementName(name)return name:lower():find("climb")or name:lower():find("vault")or name:lower():find("stun")or name:lower():find("ragdoll")or name:lower():find("dazed")or name:lower():find("knock")or name:lower():find("sprint")or name:lower():find("jump")or name:lower():find("swim")or name:lower():find("speed")end
 function R:Bind(character)
- disconnect(self.characterConnections);self.character=character;self.epoch=(self.epoch or 0)+1;self.lastFrame=nil;self.forces={}
+ disconnect(self.characterConnections);self:ClearNpcs();self.toolSeen=setmetatable({},{__mode="k"});self.toolWatchCount=0;self.motionWindow=nil;self.injury=nil;self.previousGoal=nil
+ self.character=character;self.epoch=(self.epoch or 0)+1;self.lastFrame=nil;self.forces={}
  self:Emit("character",{available=character~=nil})
  if not character then return end
  for _,o in ipairs(character:GetDescendants())do if isForce(o)then self.forces[o]=true end end
  self:Connect(character.DescendantAdded,function(o)
+  self:WatchTool(o)
   if isForce(o)then self.forces[o]=true;self:Emit("force_added",self:Force(o))
-  elseif movementName(o.Name)then self:Emit("marker_added",{object=ref(o),value=value(read(o,"Value"))})end
+  elseif movementName(o.Name)then self:Emit("marker_added",{object=ref(o),value=value(read(o,"Value")),damageEpisode=self.injury and self.injury.id})end
  end,true)
  self:Connect(character.DescendantRemoving,function(o)
   if self.forces[o]then self:Emit("force_removed",{object=ref(o)});self.forces[o]=nil
-  elseif movementName(o.Name)then self:Emit("marker_removed",{object=ref(o)})end
+  elseif movementName(o.Name)then self:Emit("marker_removed",{object=ref(o),damageEpisode=self.injury and self.injury.id})end
  end,true)
  local h=character:FindFirstChildOfClass("Humanoid")
  if h then
   self:Connect(h.StateChanged,function(a,b)self:Emit("humanoid_state",{from=a.Name,to=b.Name})end,true)
-  self:Connect(h.HealthChanged,function(hp)self:Emit("health",{health=hp,maxHealth=h.MaxHealth})end,true)
+  local lastHp=h.Health
+  self:Connect(h.HealthChanged,function(hp)
+   self:Emit("health",{health=hp,previous=lastHp,delta=number(hp-lastHp),maxHealth=h.MaxHealth})
+   if hp<lastHp then
+    self.injurySerial=(self.injurySerial or 0)+1;self.injury={id=self.injurySerial,t=os.clock(),hp=hp}
+    self:Emit("damage_episode",{id=self.injurySerial,phase="hit",loss=lastHp-hp,health=hp})
+   end;lastHp=hp
+  end,true)
   for _,name in ipairs({"WalkSpeed","JumpPower","JumpHeight","HipHeight","AutoRotate","PlatformStand","Sit","UseJumpPower"})do
    self:Connect(h:GetPropertyChangedSignal(name),function()self:Emit("humanoid_property",{property=name,value=value(read(h,name))})end,true)
   end
@@ -155,6 +191,12 @@ function R:Bind(character)
    local animation=read(track,"Animation");self:Emit("animation_started",{id=animation and animation.AnimationId,name=track.Name,priority=tostring(track.Priority),speed=track.Speed})
   end,true)end
  end
+ local backpack=p:FindFirstChild("Backpack")
+ if backpack then
+  for _,o in ipairs(backpack:GetChildren())do self:WatchTool(o)end
+  self:Connect(backpack.DescendantAdded,function(o)self:WatchTool(o)end,true)
+ end
+ for _,o in ipairs(character:GetChildren())do self:WatchTool(o)end
  for _,o in ipairs(character:GetDescendants())do
   if o:IsA("BasePart")then
    for _,name in ipairs({"CanCollide","Anchored","CollisionGroup"})do self:Connect(o:GetPropertyChangedSignal(name),function()
@@ -175,13 +217,35 @@ function R:Frame(dt)
   jump=h.Jump,floor=h.FloorMaterial.Name,health=h.Health,maxHealth=h.MaxHealth,anchored=root.Anchored,collide=root.CanCollide,collisionGroup=root.CollisionGroup,
   autoRotate=h.AutoRotate,platformStand=h.PlatformStand,sit=h.Sit})
  self.lastFrame={t=now,p=pos};self.samples+=1
+ local w=self.motionWindow
+ if not w then self.motionWindow={t=now,p=pos,last=pos,path=0,up=0,down=0}
+ else
+  local delta=pos-w.last;w.path+=Vector3.new(delta.X,0,delta.Z).Magnitude;w.up+=math.max(0,delta.Y);w.down+=math.max(0,-delta.Y);w.last=pos
+  if now-w.t>=.2 then
+   local duration=now-w.t;local speed=w.path/duration
+   self:Emit("motion_window",{duration=duration,horizontalSpeed=speed,upSpeed=w.up/duration,downSpeed=w.down/duration,move=vec(h.MoveDirection),state=h:GetState().Name,stalled=speed<1 and h.MoveDirection.Magnitude>.5,frameGap=elapsed>.1})
+   self.motionWindow=nil
+  end
+ end
+ local goal=h.WalkToPoint
+ if not self.previousGoal or(goal-self.previousGoal).Magnitude>.1 then self.previousGoal=goal;self:Emit("walk_goal",{p=vec(goal)})end
+ if self.injury then
+  local age=now-self.injury.t
+  if age>=2 then self:Emit("damage_episode",{id=self.injury.id,phase="after_2s",health=h.Health,state=h:GetState().Name,p=vec(pos),walkSpeed=h.WalkSpeed});self.injury=nil end
+ end
  local point={position=vec(pos),cframe=frame(root.CFrame),time=os.time(),elapsed=now-self.started}
  if #self.current.points==0 then self.current.points[1]=point else self.current.points[2]=point end
 end
 function R:Medium()
  local c=self.character;local root=c and c:FindFirstChild("HumanoidRootPart");local h=c and c:FindFirstChildOfClass("Humanoid")
  if not root or not h then return end
- local data={forces={},animations={},attributes={},keys={},focused=self.focused~=false}
+ local data={forces={},animations={},attributes={},keys={},combatMarkers={},tools={},focused=self.focused~=false,damageEpisode=self.injury and self.injury.id}
+ for _,o in ipairs(c:GetChildren())do
+  if movementName(o.Name)or o.Name:lower():find("block")or o.Name:lower():find("attack")then
+   if #data.combatMarkers<32 then data.combatMarkers[#data.combatMarkers+1]={object=ref(o),value=value(read(o,"Value"))}end
+  end
+  if o:IsA("Tool")and #data.tools<16 then data.tools[#data.tools+1]={object=ref(o),enabled=read(o,"Enabled"),attributes={Ready=value(o:GetAttribute("Ready")),Reloaded=value(o:GetAttribute("Reloaded"))}}end
+ end
  local count=0
  for o in pairs(self.forces)do
   if o.Parent then count+=1;if count<=48 then data.forces[#data.forces+1]=self:Force(o)end else self.forces[o]=nil end
@@ -246,7 +310,10 @@ function R:Slow()
  end end end
  table.sort(candidates,function(a,b)return a.distance<b.distance end)
  local targets={}
+ local retained={};for i=1,math.min(12,#candidates)do retained[candidates[i].model]=true end
+ for model,entry in pairs(self.npcWatches)do if not retained[model]then disconnect(entry.connections);self.npcWatches[model]=nil end end
  for i=1,math.min(12,#candidates)do local n=candidates[i];local target=n.model:FindFirstChild("Target");local targetValue=target and read(target,"Value")
+  self:WatchNpc(n)
   targets[#targets+1]={object=ref(n.model),p=vec(n.root.Position),v=vec(n.root.AssemblyLinearVelocity),health=n.h.Health,maxHealth=n.h.MaxHealth,
    state=n.h:GetState().Name,distance=n.distance,targetsLocal=targetValue==p or targetValue==self.character}
  end
@@ -284,7 +351,7 @@ function R:Start(title,description)
  assert(type(appendfile)=="function","Executor appendfile support is required")
  self:EnsureFolder();local data=self:New("route",title,description)
  data.state="recording";data.format="jsonl";data.dataPath=self.folder.."/"..data.id..".jsonl"
- data.capture={frames="every Heartbeat",detailsHz=10,gameStateHz=1,geometryProbes=7,nearbyNpcLimit=12,inboundRemotes="filtered names; strings redacted",outboundRemotes=false,keyNames=keyNames,maxQueueBytes=self.maxQueueBytes}
+ data.capture={frames="every Heartbeat",detailsHz=10,gameStateHz=1,geometryProbes=7,nearbyNpcLimit=12,npcHealth="event driven for nearest 12; discovery 1Hz",toolActions=true,motionWindows=.2,forceAttachments=true,inboundRemotes="filtered names; strings redacted",outboundRemotes=false,keyNames=keyNames,maxQueueBytes=self.maxQueueBytes}
  writefile(data.dataPath,"")
  self.queue={};self.queuedBytes=0;self.seq=0;self.rows=0;self.samples=0;self.dropped=0;self.writeErrors=0;self.encodeErrors=0;self.callbackErrors=0
  self.appendVerified=false;self.current=data;self.started=os.clock();self.mediumAt=0;self.slowAt=0;self.remoteAt=0;self.saveAt=0;self.epoch=0
@@ -296,7 +363,7 @@ end
 function R:Stop(reason)
  local data=self.current;if not data then return self.lastPath end
  self:Emit("session_stop",{reason=reason or "User Stop"});data.state="stopped";data.stopReason=reason or "User Stop";data.finishedAt=os.time();data.duration=os.clock()-self.started
- self.current=nil;self.finishing=data;disconnect(self.characterConnections);self.character=nil;self.forces={}
+ self.current=nil;self.finishing=data;disconnect(self.characterConnections);self:ClearNpcs();self.character=nil;self.forces={}
  self:Flush();self:Save(data)
  if #self.queue==0 and not self.flushing then self.finishing=nil end
  self.status=#self.queue==0 and "Stopped and saved"or "Stopped; waiting for disk write"
@@ -327,7 +394,9 @@ local function key(input)
  for _,name in ipairs(keyNames)do if input.KeyCode==Enum.KeyCode[name]then return name end end
 end
 R:Connect(Input.InputBegan,function(input,processed)
- if R.current and not Input:GetFocusedTextBox()then local name=key(input);if name then R:Emit("input",{key=name,down=true,processed=processed})end end
+ if R.current and not Input:GetFocusedTextBox()then local name=key(input);if name then R:Emit("input",{key=name,down=true,processed=processed})end
+  local kind=tostring(read(input,"UserInputType"));if kind=="Enum.UserInputType.MouseButton1"or kind=="Enum.UserInputType.MouseButton2"then R:Emit("attack_input",{button=kind,down=true,processed=processed,note="Input only; not proof of attack"})end
+ end
 end)
 R:Connect(Input.InputEnded,function(input,processed)
  if R.current then local name=key(input);if name then R:Emit("input",{key=name,down=false,processed=processed})end end
