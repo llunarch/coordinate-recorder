@@ -67,7 +67,8 @@ local game={PlaceId=3978370137,GameId=648454481,JobId="job",GetService=function(
 local workspace=object("Workspace","Workspace");function workspace:Raycast()return nil end
 local disk={};local appended={};local failAppend=false;local failWrite=false
 local function writefile(path,text)if failWrite then error("disk failed")end;disk[path]=text end
-local function appendfile(path,text)if failAppend then error("append failed")end;assert(disk[path]~=nil);appended[#appended+1]={path=path,text=text}end
+local function appendfile(path,text)if failAppend then error("append failed")end;assert(disk[path]~=nil);if #text>8192 then return end;disk[path]=disk[path]..text;appended[#appended+1]={path=path,text=text}end
+local function readfile(path)return assert(disk[path])end
 local folders={};local function isfolder(path)return folders[path]end;local function makefolder(path)folders[path]=true end
 local jobs={};local task={spawn=function(fn)jobs[#jobs+1]=fn end,wait=function()end}
 local R=(function()
@@ -78,15 +79,16 @@ local snapshot=R:Snapshot("Point","Note");assert(disk[snapshot]and #R.last.point
 local path=R:Start("Movement","Start");assert(path:sub(-6)==".jsonl"and disk[path]=="")
 assert(not pcall(function()R:Start("Duplicate","")end))
 R:Tick(.02);R:Flush()
-local first=appended[#appended].text
+local first=disk[path]
 assert(first:find('"kind":"frame"',1,true)and first:find('"autoRotate":false',1,true),"false values or frames lost")
 remote.OnClientEvent:Fire("Start",{Method="Craft",Secret="DO_NOT_CAPTURE"},"DO_NOT_CAPTURE")
-R:Flush();local receipt=appended[#appended].text
+R:Flush();local receipt=disk[path]
 assert(receipt:find('"kind":"server_event"',1,true)and not receipt:find('DO_NOT_CAPTURE',1,true),"inbound payload leaked unrelated strings")
 hum.StateChanged:Fire({Name="Running"},{Name="Climbing"});hum.WalkSpeed=40;hum:GetPropertyChangedSignal("WalkSpeed"):Fire()
 R:Snapshot("Wall","Start climbing");assert(#R.current.markers==1)
 R:UpdateNotes("Castle","Walk and climb");assert(R.current.title=="Castle")
-for i=1,8000 do now+=.02;R:Tick(.02);if i%50==0 then assert(R:Flush())end end
+for i=1,8000 do now+=.02;R:Tick(.02);if i%50==0 then assert(R:Flush());disk[path]=""end end
+assert(R.appendVerified,"first append was not read back")
 assert(R.current and R.samples>=8000 and #R.current.points<=2,"old time/sample cap or unbounded point storage")
 p.Character=nil;now+=1;R:Tick(.02);assert(R.current,"respawn stopped capture")
 p.Character=character();now+=1;R:Tick(.02);assert(R.current and R.epoch>=3,"character rebind failed")

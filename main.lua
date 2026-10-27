@@ -60,7 +60,7 @@ function R:Save(data)
  local path=self.folder.."/"..data.id..(data.kind=="route"and".manifest.json"or".json")
  if data.kind=="route"then
   data.counters={samples=self.samples,rowsWritten=self.rows,sequence=self.seq,dropped=self.dropped,writeErrors=self.writeErrors,
-   encodeErrors=self.encodeErrors,callbackErrors=self.callbackErrors or 0,uiErrors=self.uiErrors or 0,pendingRows=#self.queue,pendingBytes=self.queuedBytes}
+   encodeErrors=self.encodeErrors,appendVerified=self.appendVerified==true,callbackErrors=self.callbackErrors or 0,uiErrors=self.uiErrors or 0,pendingRows=#self.queue,pendingBytes=self.queuedBytes}
  end
  self.last=data;self.lastPath=data.dataPath or path
  writefile(path,H:JSONEncode(data));return self.lastPath
@@ -81,7 +81,24 @@ function R:Flush()
  self.flushing=true
  local batch=self.queue;self.queue={};self.queuedBytes=0
  local data=self.current or self.finishing
- local ok=pcall(appendfile,data.dataPath,table.concat(batch))
+ local text=table.concat(batch)
+ local ok=pcall(function()
+  -- Real currently accepts small appends but silently discards 64KiB+ payloads.
+  local first=1
+  while first<=#text do
+   local last=math.min(first+8191,#text)
+   -- Keep a UTF-8 codepoint together if the executor transports strings as text.
+   if last<#text then while last>=first do local byte=string.byte(text,last+1);if not byte or byte<128 or byte>=192 then break end;last-=1 end end
+   assert(last>=first,"Invalid append boundary")
+   appendfile(data.dataPath,text:sub(first,last));first=last+1
+  end
+  if not self.appendVerified then
+   assert(type(readfile)=="function","Readback verification requires readfile")
+   local actual=readfile(data.dataPath)
+   assert(#actual>=#text and actual:sub(-#text)==text,"Append readback failed")
+   self.appendVerified=true
+  end
+ end)
  if ok then self.rows+=#batch else
   self.writeErrors+=1
   local merged={};local bytes=0
@@ -270,7 +287,7 @@ function R:Start(title,description)
  data.capture={frames="every Heartbeat",detailsHz=10,gameStateHz=1,geometryProbes=7,nearbyNpcLimit=12,inboundRemotes="filtered names; strings redacted",outboundRemotes=false,keyNames=keyNames,maxQueueBytes=self.maxQueueBytes}
  writefile(data.dataPath,"")
  self.queue={};self.queuedBytes=0;self.seq=0;self.rows=0;self.samples=0;self.dropped=0;self.writeErrors=0;self.encodeErrors=0;self.callbackErrors=0
- self.current=data;self.started=os.clock();self.mediumAt=0;self.slowAt=0;self.remoteAt=0;self.saveAt=0;self.epoch=0
+ self.appendVerified=false;self.current=data;self.started=os.clock();self.mediumAt=0;self.slowAt=0;self.remoteAt=0;self.saveAt=0;self.epoch=0
  self:Emit("session_start",{placeId=game.PlaceId,universeId=game.GameId,jobId=game.JobId,createdAt=data.createdAt,capture=data.capture})
  self:Bind(p.Character);self:ObserveRemotes();self:Save(data)
  self.status="Recording (until Stop)"

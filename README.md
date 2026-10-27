@@ -22,7 +22,7 @@ There are **no loadstring, function or namecall hooks**, no outgoing remote inte
 
 `CoordinateRecorder/records/<UserId>/<GUID>.jsonl` contains append-only timestamped events. `<GUID>.manifest.json` contains title/notes, scope, counters and file path. Snapshots remain separate JSON files and add streamed markers to an active session. **Copy Last File Path** gives the JSONL path; **Copy Session Manifest** copies metadata, not an ever-growing recording.
 
-The writer flushes about every0.5seconds, not by rewriting the full session. No duration or total-sample limit; respawn records a new character epoch and continues. Roblox disconnect/rejoin destroys the injected runtime: reload in the new session. Abrupt process exits can lose the last unflushed batch.
+The writer flushes about every0.5seconds in UTF-8-safe blocks of at most8KiB, not by rewriting the full session. The first append batch is read back and checked; `appendVerified` in the manifest records that check. Small blocks avoid an observed Real failure where64KiB+ appends returned without writing bytes. No duration or total-sample limit; respawn records a new character epoch and continues. Roblox disconnect/rejoin destroys the injected runtime: reload in the new session. Abrupt process exits can lose the last unflushed batch.
 
 RAM backlog is bounded to8MiB/5000rows, plus an in-flight batch. A prolonged disk failure drops oldest pending rows and increments `dropped`; recording remains enabled. Writes retry without restarting gameplay. Sequence numbers allow duplicate detection after uncertain append failures. A truncated last line after a crash must be ignored. Disk use grows until Stop; this is not an unlimited-storage or lossless guarantee. On unload, a failing final writer has at most3 shutdown retries.
 
@@ -33,4 +33,4 @@ python verify.py /path/to/luau
 python analyze_recording.py /path/to/session.jsonl
 ```
 
-Offline tests exercise the actual embedded backend: frames/false properties, redacted server receipts, snapshot/markers/notes,8000+frames,respawn,ten-hour time advance,disk retry,bounded backlog and teardown. These tests do not prove compatibility with every executor or third-party hub. Requires writefile/appendfile/isfolder/makefolder/getgenv and setclipboard for Copy buttons.
+Offline tests exercise the actual embedded backend: frames/false properties, redacted server receipts, snapshot/markers/notes,8000+frames,respawn,ten-hour time advance,disk retry,bounded backlog and teardown. These tests do not prove compatibility with every executor or third-party hub. Requires writefile/appendfile/readfile/isfolder/makefolder/getgenv and setclipboard for Copy buttons.
